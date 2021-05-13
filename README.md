@@ -23,13 +23,13 @@ Make sure you have Cargo installed on your computer (the Rust compiler). Then in
 # What is \< PLUGIN_NAME \>?
 \< medium description goes here \>
 
-# Controls Explained
+## Controls Explained
 + list
 + of
 + parameter
 + names: and short descriptions for each one of them
 
-# Extra Info for Nerds
+## Extra Info for Nerds
 \< long description goes here \>
 
 
