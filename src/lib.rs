@@ -224,11 +224,22 @@ impl Plugin for Effect {
         Arc::clone(&self.params) as Arc<dyn PluginParameters>
     }
 
-    // TODO: not sure when exactly this is called
     fn resume(&mut self) {}
 
-    // TODO: not sure when exactly this is called
     fn suspend(&mut self) {}
+
+    fn process_events(&mut self, events: &api::Events) {
+        for e in events.events() {
+            match e {
+                EventType::Midi => {
+                    let midi_event: &MidiEvent = unsafe {
+                        std::mem::transmute(e)
+                    };
+                }
+                _ => ()
+            }
+        }
+    }
 
     // Here is where the bulk of our audio processing code goes.
     fn process(&mut self, buffer: &mut AudioBuffer<f32>) {
