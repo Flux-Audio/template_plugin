@@ -23,17 +23,22 @@ use dsp_lab::traits::{Source, Process};
 use dsp_lab::core::lin_filter::LowPass1P;
 
 // standard libraries
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::f64::consts;
+use std::collections::HashMap;
 use core::arch::x86_64::{
     _MM_FLUSH_ZERO_ON,
     _MM_SET_FLUSH_ZERO_MODE,
     _MM_GET_FLUSH_ZERO_MODE
 };
 
+use crate::parameter_manager::{Parameter, ParameterManager};
+
 // internal dependencies
 mod process;        // contains the processing loop for the active input buffer
 mod algorithms;     // contains support structs and functions for processing
+mod parameter_manager;
+mod voice_allocator;
 // mod editor;      // contains the editor (GUI) logic NOTE: uncomment for GUI
 // mod widgets;     // contains rendering of custom ui elements NOTE: uncomment for GUI
 
@@ -43,77 +48,7 @@ mod algorithms;     // contains support structs and functions for processing
 
 
 // === PARAMETERS ===
-// TODO: move the entire parameter logic into a separate file with a ParameterManager
-// struct.
-// parameters struct of vst plugin is defined here, with default values, getters
-// and setters.
 
-// Effect parameters are stored in a vector, indexed by the parameter id the host
-// passes to the callback functions.
-pub struct EffectParameters {
-    params: Vec<AtomicFloat>,
-}
-
-// here is where initial values of parameters are set. These values show up when
-// first instantiating the plugin.
-impl Default for EffectParameters {
-    fn default() -> Self {
-        let mut ret = Self {
-            params: Vec::new(),
-        };
-
-        // add a push for each parameter
-        ret.params.push(AtomicFloat::new(0.5));
-
-        return ret;
-    }
-}
-
-// here is where the callback functions the host will call to get and set
-// parameter values and parameter names.
-impl PluginParameters for EffectParameters {
-
-    // this bit is always the same
-    fn get_parameter(&self, index: i32) -> f32 {
-        match self.params.get(index as usize) {
-            Some(p) => p.get(),
-            None => 0.0,
-        }
-    }
-
-    // this bit is always the same
-    fn set_parameter(&self, index: i32, val: f32) {
-        match self.params.get(index as usize) {
-            Some(p) => p.set(val),
-            None => (),
-        }
-    }
-
-    // this returns the numeric readout of the parameter value. Format this to
-    // to display ranges outside 0.0..1.0, adding units, ...
-    fn get_parameter_text(&self, index: i32) -> String {
-
-        // the parameter index corresponds to the order they were pushed into
-        // the parameter vector.
-        // NOTE: this will panic, if the specified parameter index is out of bounds
-        match index {
-            0 => format!("{:.2}", self.params.get(0).unwrap().get()),
-            _ => "".to_string(),
-        }
-    }
-
-    fn get_parameter_name(&self, index: i32) -> String {
-
-        // the parameter index corresponds to the order they were pushed into
-        // the parameter vector.
-        match index {
-            0 => "parameter name goes here",
-            _ => "",
-        }.to_string()
-    }
-
-    // TODO: missing methods for preset management
-}
 
 
 // === PLUGIN ===
@@ -125,7 +60,7 @@ impl PluginParameters for EffectParameters {
 // effect
 pub struct Effect {
     // Store a handle to the plugin's parameter object.
-    params: Arc<EffectParameters>,
+    parameter_manager: Arc<ParameterManager>,
 
     // store a handle to the GUI NOTE: uncomment for GUI
     // editor: Option<EffectEditor>,
@@ -135,36 +70,20 @@ pub struct Effect {
     scale: f64,         // scaling factor for sample rate independence
     dt: f64,            // duration of each sample
 
-    // parameter filters
-    // NOTE: these are used to de-click parameter tweaking during playback
-    param_filters: Vec<LowPass1P>,
-
-    // NOTE: any stateful processing requires the state to be declared here, i.e.
-    // any dsp_lab process or generator.
-
-    // ... your stuff goes here ...
-
 }
 
 // this is where the state of the plugin is initialized
 impl Default for Effect {
     fn default() -> Self {
-        let params = Arc::new(EffectParameters::default());
-        let param_filters = vec![LowPass1P::new()];     // TODO: change dsplab
-        
+        // TODO: call to user code to initialize parameter manager
         Self {
-            params: params.clone(),
+            parameter_manager: Arc::new(ParameterManager::default()).clone(),
 
             // host info. these should not be left to their default value
             // they are changed at runtime with the set_sample_rate() callback
             sr: 44100.0,
             scale: 1.0,
             dt: 1.0 / 44100.0,
-
-            // parameter filters
-            param_filters: param_filters,
-
-            // ... your stuff goes here ...
         }
     }
 }
@@ -202,9 +121,7 @@ impl Plugin for Effect {
     // NOTE: use this to run code that needs to be run only once after the plugin is
     // instantiated
     fn init(&mut self) {
-
-        self.param_filters[0].set_sr(self.sr);      // TODO: implement this in dsplab
-        self.param_filters[0].set_cutoff(5.0);
+        self.parameter_manager.set_sr(self.sr as f32);
 
         // ... your stuff goes here ...
     }
@@ -221,25 +138,14 @@ impl Plugin for Effect {
     // Return the parameter object. This method can be omitted if the
     // plugin has no parameters.
     fn get_parameter_object(&mut self) -> Arc<dyn PluginParameters> {
-        Arc::clone(&self.params) as Arc<dyn PluginParameters>
+        self.parameter_manager.clone() as Arc<dyn PluginParameters>
     }
 
+    // TODO: not sure when exactly this is called
     fn resume(&mut self) {}
 
+    // TODO: not sure when exactly this is called
     fn suspend(&mut self) {}
-
-    fn process_events(&mut self, events: &api::Events) {
-        for e in events.events() {
-            match e {
-                EventType::Midi => {
-                    let midi_event: &MidiEvent = unsafe {
-                        std::mem::transmute(e)
-                    };
-                }
-                _ => ()
-            }
-        }
-    }
 
     // Here is where the bulk of our audio processing code goes.
     fn process(&mut self, buffer: &mut AudioBuffer<f32>) {
@@ -255,7 +161,48 @@ impl Plugin for Effect {
 
         // === process audio buffer ===
 
-        process::process_chunk(self, buffer);
+        let (inputs, outputs) = buffer.split();
+    
+        // iterate over input and output buffers as references
+        let (l, r) = inputs.split_at(1);
+        let stereo_in = l[0].iter().zip(r[0].iter());
+        let (mut l, mut r) = outputs.split_at_mut(1);
+        let stereo_out = l[0].iter_mut().zip(r[0].iter_mut());
+        for ((left_in, right_in), (left_out, right_out)) in stereo_in.zip(stereo_out) {
+
+            // === parameter filtering ===
+            // while we read parameters once per chunk, we want to filter them at
+            // the same rate as the audio, as we do this to remove audio artifacts.
+            self.parameter_manager.step_filter();
+            let some_parameter = self.parameter_manager.params[0].filtered.get() as f64;
+
+            // === macro mappings ===
+            // the ui might have less parameters than the underlying logic implies,
+            // so there is a mapping between the UI macros and the audio processing
+            // NOTE: mappings go here
+
+            // === micro mappings ===
+            // function and process parameter mappings from macros
+            // NOTE: mappings go here
+
+            // === main signal chain(s) ===
+            // here is where the signal routed from input to output is processed,
+            // with the parameters set up previously
+            // NOTE: processing goes here. The example is a simple gain plugin
+            let mut l = *left_in as f64;
+            let mut r = *right_in as f64;
+            l *= some_parameter;
+            r *= some_parameter;
+            *left_out = l as f32;
+            *right_out = r as f32;
+
+            // === feedback and aux signal chain(s) ===
+            // any other signal chain that isn't routed to the output is processed
+            // here, for example feedback paths.
+            // NOTE: processing goes here
+
+
+        }
 
         // === post-processing cleanup ===
         // NOTE: here you undo any pre-processing
