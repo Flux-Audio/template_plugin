@@ -7,8 +7,9 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-vst = "0.2.x"
+vst = "~0.2"
 dsp_lab = {git = "https://github.com/Flux-Audio/dsp_lab.git", branch="master"}
+toml = "~0.5.8"
 
 [lib]
 name = "TEMPLATE_PLUGIN_v0_1_0_dev"
